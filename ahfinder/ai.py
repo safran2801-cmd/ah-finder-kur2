@@ -138,11 +138,12 @@ CHAT_TOOLS = [
         "function": {
             "name": "check_hut_availability",
             "description": (
-                "Prüft die aktuelle Bettenverfügbarkeit einer SAC-Hütte für die nächsten 14 Tage. "
+                "Prüft die aktuelle Bettenverfügbarkeit einer Hütte für die nächsten 14 Tage. "
                 "Verwende dieses Tool wenn der Nutzer fragt ob eine Hütte frei ist, "
                 "Betten verfügbar sind, ob man reservieren kann, oder ähnliche Verfügbarkeitsfragen. "
-                "Gibt für jeden Tag an ob Betten frei (available) oder ausgebucht (booked) sind "
-                "sowie die Anzahl freier Plätze."
+                "Funktioniert für SAC-Hütten über das SAC-Tourenportal (tagesgenau, mit freien "
+                "Plätzen) und zusätzlich für nicht-SAC-Hütten (DAV/ÖAV/CAI/FFCAM etc.), indem die "
+                "offizielle Website live auf ein bekanntes Online-Kalendersystem geprüft wird."
             ),
             "parameters": {
                 "type": "object",
@@ -223,40 +224,103 @@ CHAT_TOOLS = [
 ]
 
 
-def _tool_check_availability(hut_name: str) -> str:
-    """Verfügbarkeit einer SAC-Hütte für die nächsten 14 Tage abfragen."""
+def _find_hut_by_name(hut_name: str, huts: list) -> Optional[dict]:
+    """Findet ein Hütten-Dict aus der aktuellen Suchergebnisliste per Namen.
+
+    Versucht: exakter Match -> case-insensitiv -> Teilstring (in beide
+    Richtungen), analog zu availability.find_portal_url().
+    """
+    if not huts:
+        return None
+    lower = hut_name.lower().strip()
+    for h in huts:
+        if h.get("name") == hut_name:
+            return h
+    for h in huts:
+        if (h.get("name") or "").lower() == lower:
+            return h
+    for h in huts:
+        name_l = (h.get("name") or "").lower()
+        if name_l and (lower in name_l or name_l in lower):
+            return h
+    return None
+
+
+def _tool_check_availability(hut_name: str, huts: Optional[list] = None) -> str:
+    """Verfügbarkeit einer Hütte für die nächsten 14 Tage abfragen.
+
+    Zwei-stufiger Ansatz:
+    1. SAC-Tourenportal (sac_hut_mapping.json) - tagesgenaue Betten-API.
+    2. Fallback für nicht-SAC-Hütten (DAV/ÖAV/CAI/FFCAM etc.): die offizielle
+       Website der Hütte wird live auf ein bekanntes Online-Kalendersystem
+       geprüft (generic_calendar.detect_system) und - falls per HTTP
+       abrufbar - direkt ausgelesen.
+    """
     from .availability import fetch_hut_availability, find_portal_url
-    from datetime import date
+    from datetime import date, timedelta
 
     portal_url = find_portal_url(hut_name)
-    if not portal_url:
-        return (
-            f"Die Hütte '{hut_name}' wurde nicht im SAC-Hütten-Verzeichnis gefunden. "
-            "Keine Verfügbarkeitsdaten verfügbar."
-        )
+    if portal_url:
+        avail = fetch_hut_availability(hut_name)
+        if not avail:
+            return (
+                f"Für '{hut_name}' sind keine Verfügbarkeitsdaten verfügbar "
+                "(kein Online-Reservierungssystem oder Hütte nicht erreichbar)."
+            )
 
-    avail = fetch_hut_availability(hut_name)
-    if not avail:
+        today = date.today()
+        lines = [f"Verfügbarkeit '{hut_name}' (nächste 14 Tage):"]
+        for iso_date, info in sorted(avail.items()):
+            try:
+                d = date.fromisoformat(iso_date)
+            except ValueError:
+                continue
+            if d < today:
+                continue
+            weekday = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"][d.weekday()]
+            status_label = "frei" if info["status"] == "available" else "ausgebucht"
+            places = info["freePlaces"]
+            places_str = f", {places} Plätze frei" if info["status"] == "available" and places > 0 else ""
+            lines.append(f"  {weekday} {d.strftime('%d.%m.%Y')}: {status_label}{places_str}")
+
+        return "\n".join(lines)
+
+    # Nicht im SAC-Verzeichnis -> Fallback über die offizielle Website
+    from . import generic_calendar
+
+    hut = _find_hut_by_name(hut_name, huts or [])
+    website_url = (hut or {}).get("websiteUrl") or (hut or {}).get("website")
+    if not hut or not website_url:
         return (
-            f"Für '{hut_name}' sind keine Verfügbarkeitsdaten verfügbar "
-            "(kein Online-Reservierungssystem oder Hütte nicht erreichbar)."
+            f"Die Hütte '{hut_name}' wurde nicht im SAC-Hütten-Verzeichnis gefunden, "
+            "und es ist keine offizielle Website bekannt, über die ein Kalendersystem "
+            "erkannt werden könnte. Keine Verfügbarkeitsdaten verfügbar."
         )
 
     today = date.today()
-    lines = [f"Verfügbarkeit '{hut_name}' (nächste 14 Tage):"]
-    for iso_date, info in sorted(avail.items()):
-        try:
-            d = date.fromisoformat(iso_date)
-        except ValueError:
-            continue
-        if d < today:
-            continue
-        weekday = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"][d.weekday()]
-        status_label = "frei" if info["status"] == "available" else "ausgebucht"
-        places = info["freePlaces"]
-        places_str = f", {places} Plätze frei" if info["status"] == "available" and places > 0 else ""
-        lines.append(f"  {weekday} {d.strftime('%d.%m.%Y')}: {status_label}{places_str}")
+    end = today + timedelta(days=14)
+    result = generic_calendar.check_via_website(hut_name, website_url, today, end)
 
+    if result.error and not result.blocked_dates:
+        return (
+            f"Für '{hut_name}' (nicht im SAC-Tourenportal) konnte keine Live-"
+            f"Verfügbarkeit ermittelt werden: {result.error}"
+        )
+
+    lines = [
+        f"Verfügbarkeit '{hut_name}' (System: {result.system}, nächste 14 Tage, "
+        "belegte Tage):"
+    ]
+    if result.blocked_dates:
+        for iso_date in result.blocked_dates:
+            try:
+                d = date.fromisoformat(iso_date)
+            except ValueError:
+                continue
+            weekday = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"][d.weekday()]
+            lines.append(f"  {weekday} {d.strftime('%d.%m.%Y')}: belegt")
+    else:
+        lines.append("  Keine belegten Tage im Zeitraum gefunden (oder alle Tage frei).")
     return "\n".join(lines)
 
 
@@ -536,7 +600,7 @@ def _clean_text(text: str) -> str:
     return text
 
 
-def chat_response(messages: list, context: str) -> str:
+def chat_response(messages: list, context: str, huts: Optional[list] = None) -> str:
     """Multi-Turn-Chat mit Function Calling (Wikipedia + Web-Suche als Tools)."""
     api_key = INFOMANIAK_API_KEY
     if _is_placeholder_key(api_key):
@@ -592,7 +656,7 @@ def chat_response(messages: list, context: str) -> str:
             query = args.get("query", "")
 
             if fn_name == "check_hut_availability":
-                result = _tool_check_availability(args.get("hut_name", ""))
+                result = _tool_check_availability(args.get("hut_name", ""), huts)
             elif fn_name == "search_wikipedia":
                 result = _tool_wikipedia(query)
             elif fn_name == "search_web":

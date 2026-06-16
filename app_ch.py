@@ -465,7 +465,7 @@ if data:
             with st.chat_message("assistant"):
                 with st.spinner(""):
                     answer = chat_response(
-                        st.session_state["chat_history"], context
+                        st.session_state["chat_history"], context, huts_to_show
                     )
                 st.write(answer)
 

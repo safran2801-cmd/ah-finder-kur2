@@ -2,13 +2,32 @@
 from __future__ import annotations
 
 import json
+import math
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from urllib.parse import quote
 
 from .cache import cache_get, cache_set
 from .config import CONFIG, cache_key
 from .http import http_get
+
+# Maximale Distanz (km) zwischen Huette und gefundenem Wikipedia/Wikidata-
+# Eintrag, damit ein per Namens-Fallback (ohne OSM wikipedia/wikidata-Tag)
+# gefundener Treffer akzeptiert wird. Grosszuegig gewaehlt, um ungenaue
+# Wikipedia-Koordinaten (z.B. naechstgelegener Ort statt exakter Huette)
+# zu tolerieren, aber eng genug, um klare Namenskollisionen (z.B. "La
+# Jonquille" = Schweizer SAC-Huette vs. franzoesisches Marine-Patrouillenboot
+# in Toulon, >500km entfernt) zuverlaessig auszuschliessen.
+_GEO_MATCH_MAX_KM = 20.0
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
 
 
 def _candidate_transliteration(name: str) -> str:
@@ -154,7 +173,74 @@ def _fetch_wikidata_image(qid: str) -> Optional[str]:
     return None
 
 
+def _fetch_wikidata_coords(qid: str) -> Optional[Tuple[float, float]]:
+    """Holt Koordinaten (P625) eines Wikidata-Items - genutzt um Namens-
+    Fallback-Treffer (siehe _GEO_MATCH_MAX_KM) geografisch zu verifizieren."""
+    if not qid:
+        return None
+    ck = cache_key("wikidata_coords", qid)
+    cached = cache_get(ck)
+    if cached is not None:
+        return tuple(cached) if isinstance(cached, (list, tuple)) else None
+
+    url = (
+        f"{CONFIG['wikidata']['endpoint']}?action=wbgetentities"
+        f"&ids={quote(qid)}&props=claims&format=json"
+    )
+    r = http_get(url, 8)
+    if r["code"] != 200 or not r["body"]:
+        if _is_definitive_miss(r):
+            cache_set(ck, False, 86400)
+        return None
+    try:
+        j = json.loads(r["body"])
+        claims = j.get("entities", {}).get(qid, {}).get("claims", {}).get("P625", [])
+        if claims:
+            val = claims[0].get("mainsnak", {}).get("datavalue", {}).get("value") or {}
+            lat, lon = val.get("latitude"), val.get("longitude")
+            if lat is not None and lon is not None:
+                cache_set(ck, [lat, lon], 86400)
+                return (lat, lon)
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    cache_set(ck, False, 86400)
+    return None
+
+
+def _verify_geo_match(h: dict, j: dict) -> bool:
+    """Prueft bei einem Namens-Fallback-Treffer (kein OSM wikipedia/wikidata-
+    Tag vorhanden), ob der gefundene Wikipedia-Artikel ueberhaupt in der
+    Naehe der Huette liegt - schuetzt vor Namenskollisionen mit voellig
+    unverwandten Artikeln (Schiffe, Orte, Personen etc. mit gleichem Namen).
+    Ohne auffindbare Koordinaten wird sicherheitshalber abgelehnt (lieber
+    kein Bild als ein falsches)."""
+    try:
+        hlat, hlon = float(h["lat"]), float(h["lon"])
+    except (TypeError, ValueError, KeyError):
+        return False
+
+    coords = j.get("coordinates") or {}
+    lat, lon = coords.get("lat"), coords.get("lon")
+    if lat is None or lon is None:
+        qid = j.get("wikibase_item")
+        if qid:
+            found = _fetch_wikidata_coords(qid)
+            if found:
+                lat, lon = found
+
+    if lat is None or lon is None:
+        return False
+
+    return _haversine_km(hlat, hlon, float(lat), float(lon)) <= _GEO_MATCH_MAX_KM
+
+
 def fetch_wikipedia(h: dict) -> Optional[dict]:
+    # candidates: (lang, title, trusted) - "trusted" heisst: die Verknuepfung
+    # stammt direkt aus einem OSM wikipedia/wikidata-Tag (von der OSM-
+    # Community kuratiert) und wird ohne Geo-Check akzeptiert. Alle anderen
+    # Kandidaten sind reine Namens-Treffer und muessen sich erst per
+    # _verify_geo_match als plausibel erweisen (siehe "La Jonquille"-Bug:
+    # Schweizer SAC-Huette vs. gleichnamiges franzoesisches Marineschiff).
     candidates: List[tuple] = []
     if h.get("wikipedia"):
         wp = h["wikipedia"]
@@ -162,20 +248,20 @@ def fetch_wikipedia(h: dict) -> Optional[dict]:
             lang, title = wp.split(":", 1)
         else:
             lang, title = "de", wp
-        candidates.append((lang, title))
+        candidates.append((lang, title, True))
 
     # Schweiz = vier Landessprachen: den Huettennamen in de/fr/it abfragen,
     # in der Reihenfolge die anhand des Namens am wahrscheinlichsten ist
     # (z.B. "Cabane ..." -> zuerst Franzoesisch, "Capanna ..." -> Italienisch).
     for lang in _guess_lang_order(h["name"]):
-        candidates.append((lang, h["name"]))
+        candidates.append((lang, h["name"], False))
 
     ascii_name = _candidate_transliteration(h["name"])
     if ascii_name != h["name"]:
-        candidates.append(("en", ascii_name))
+        candidates.append(("en", ascii_name, False))
 
     tried: set = set()
-    for lang, title in candidates:
+    for lang, title, trusted in candidates:
         key2 = f"{lang}|{title}"
         if key2 in tried:
             continue
@@ -217,6 +303,13 @@ def fetch_wikipedia(h: dict) -> Optional[dict]:
             cache_set(ck, False, 86400)
             continue
 
+        if not trusted and not _verify_geo_match(h, j):
+            # Namens-Treffer ohne OSM-Verknuepfung, der geografisch nicht
+            # zur Huette passt (oder ohne auffindbare Koordinaten) - keine
+            # Namenskollision wie bei "La Jonquille" riskieren.
+            cache_set(ck, False, 86400)
+            continue
+
         # Summary-API Bild (meist klein), dann Action API fuer groesseres Bild
         image = (j.get("originalimage") or j.get("thumbnail") or {}).get("source")
         if not image:
@@ -225,9 +318,19 @@ def fetch_wikipedia(h: dict) -> Optional[dict]:
         if not image and h.get("wikidata"):
             image = _fetch_wikidata_image(h["wikidata"])
         if not image:
+            # Auch dieser Wikidata-Namens-Fallback ist ein reiner Text-Match
+            # ohne OSM-Verknuepfung - genau dieselbe Kollisionsgefahr wie
+            # beim Wikipedia-Namens-Fallback oben, daher ebenfalls per
+            # Koordinaten verifizieren statt blind zu uebernehmen.
             qid = _search_wikidata_by_name(h["name"])
             if qid:
-                image = _fetch_wikidata_image(qid)
+                qcoords = _fetch_wikidata_coords(qid)
+                try:
+                    hlat, hlon = float(h["lat"]), float(h["lon"])
+                except (TypeError, ValueError, KeyError):
+                    qcoords = None
+                if qcoords and _haversine_km(hlat, hlon, *qcoords) <= _GEO_MATCH_MAX_KM:
+                    image = _fetch_wikidata_image(qid)
 
         out = {
             "lang": lang,

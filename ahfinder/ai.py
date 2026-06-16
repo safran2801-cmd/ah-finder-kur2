@@ -655,17 +655,25 @@ def chat_response(messages: list, context: str, huts: Optional[list] = None) -> 
                 args = {}
             query = args.get("query", "")
 
-            if fn_name == "check_hut_availability":
-                result = _tool_check_availability(args.get("hut_name", ""), huts)
-            elif fn_name == "search_wikipedia":
-                result = _tool_wikipedia(query)
-            elif fn_name == "search_web":
-                result = _tool_web_search(query)
-            elif fn_name == "fetch_hut_website":
-                fetch_url = args.get("url", "")
-                result = _tool_fetch_website(fetch_url)
-            else:
-                result = "Unbekanntes Tool."
+            try:
+                if fn_name == "check_hut_availability":
+                    result = _tool_check_availability(args.get("hut_name", ""), huts)
+                elif fn_name == "search_wikipedia":
+                    result = _tool_wikipedia(query)
+                elif fn_name == "search_web":
+                    result = _tool_web_search(query)
+                elif fn_name == "fetch_hut_website":
+                    fetch_url = args.get("url", "")
+                    result = _tool_fetch_website(fetch_url)
+                else:
+                    result = "Unbekanntes Tool."
+            except Exception as e:
+                # Ein einzelner Tool-Fehler (z.B. Netzwerk-Timeout) darf nicht
+                # die gesamte Chat-Antwort abstürzen lassen - stattdessen wird
+                # der Fehler als Tool-Ergebnis zurückgegeben, damit das Modell
+                # dem Nutzer eine sinnvolle Antwort geben kann statt komplett
+                # zu scheitern.
+                result = f"Fehler bei der Ausführung des Werkzeugs '{fn_name}': {e}"
 
             working_messages.append({
                 "role": "tool",

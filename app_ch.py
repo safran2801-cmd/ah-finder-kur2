@@ -9,6 +9,7 @@ from datetime import date, timedelta
 import streamlit as st
 
 from ahfinder.ai import build_hut_context, chat_response
+from ahfinder.geo import CH_REGION_NAMES
 from ahfinder.pipeline_ch import PipelineError, run_search_ch
 
 
@@ -318,6 +319,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+REGION_OPTIONS = ["Alle Regionen"] + CH_REGION_NAMES
+
 with st.container():
     c1, c2, c3 = st.columns([1, 1, 1])
     sat_date = c1.date_input("Samstag", value=default_sat, min_value=date.today())
@@ -338,6 +341,12 @@ with st.container():
             "Nur SAC-Hütten",
             value=False,
             help="Filtert auf offizielle SAC/CAS-Hütten.",
+        )
+        selected_region = st.selectbox(
+            "Region",
+            REGION_OPTIONS,
+            index=0,
+            help="Sucht nur unter Hütten in der gewählten Region.",
         )
 
 st.markdown(
@@ -365,6 +374,7 @@ if search_clicked:
                 sun_str,
                 only_photos=only_photos,
                 only_sac=only_sac,
+                region=selected_region if selected_region != "Alle Regionen" else None,
                 progress=status.write,
             )
         except PipelineError as e:
@@ -396,6 +406,8 @@ if data:
         huts_to_show = [h for h in huts_to_show if h.get("isSac")]
     if only_photos:
         huts_to_show = [h for h in huts_to_show if h.get("wikipediaImage")]
+    if selected_region != "Alle Regionen":
+        huts_to_show = [h for h in huts_to_show if h.get("region") == selected_region]
 
     # Immer auf top_n begrenzen
     from ahfinder.config import CONFIG as _cfg

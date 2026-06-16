@@ -12,7 +12,7 @@ from typing import Callable, List, Optional
 
 from .ai import build_recommendation
 from .config import CONFIG
-from .geo import region_from_lonlat
+from .geo import ch_region_from_lonlat
 from .overpass_ch import SAC_DIRECTORY_URL, fetch_huts_ch
 
 _CURATED_PATH = Path(__file__).resolve().parent.parent / "curated_huts.json"
@@ -113,7 +113,7 @@ def _enrich_one_ch(h: dict, w: dict, sat_label: str, sun_label: str) -> dict:
         "lon": h["lon"],
         "elevation": h.get("ele"),
         "region": h.get("__region")
-        or region_from_lonlat(float(h["lat"]), float(h["lon"])),
+        or ch_region_from_lonlat(float(h["lat"]), float(h["lon"])),
         "country": "Schweiz",
         "countryCode": "CH",
         "operator": h.get("operator"),
@@ -137,6 +137,7 @@ def run_search_ch(
     sun: str,
     only_photos: bool = False,
     only_sac: bool = False,
+    region: Optional[str] = None,
     progress: Optional[Callable[[str], None]] = None,
 ) -> dict:
     def step(msg: str) -> None:
@@ -151,6 +152,19 @@ def run_search_ch(
     huts_all = huts_resp.get("huts") or []
     if not huts_all:
         raise PipelineError("Keine Schweizer Hütten gefunden")
+
+    # Regionsfilter ZUERST auf die volle Liste anwenden (vor dem 300er-Limit
+    # fuer die Wetterabfrage) - sonst wuerden Huetten einer untervertretenen
+    # Region evtl. schon durch den Cap herausfallen, bevor der Filter
+    # ueberhaupt zum Zug kommt. Spart ausserdem unnoetige Wetter-Requests fuer
+    # Huetten ausserhalb der gewuenschten Region.
+    if region and region != "Alle Regionen":
+        huts_all = [
+            h for h in huts_all
+            if ch_region_from_lonlat(float(h["lat"]), float(h["lon"])) == region
+        ]
+        if not huts_all:
+            raise PipelineError(f"Keine Hütten in der Region \"{region}\" gefunden.")
 
     huts_top = huts_all[: CONFIG["max_huetten_weather"]]
 
@@ -167,7 +181,7 @@ def run_search_ch(
         if not score:
             continue
         h2 = dict(h)
-        h2["__region"] = region_from_lonlat(float(h["lat"]), float(h["lon"]))
+        h2["__region"] = ch_region_from_lonlat(float(h["lat"]), float(h["lon"]))
         h2["__weather"] = score
         scored.append({"hut": h2, "score": score["total"]})
 

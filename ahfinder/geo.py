@@ -55,3 +55,38 @@ def region_from_lonlat(lat: float, lon: float) -> str:
         if s <= lat <= n and w <= lon <= e:
             return name
     return "Alpen"
+
+
+# Eigene, feiner abgestimmte Regionseinteilung NUR für Schweizer Hütten
+# (genutzt von pipeline_ch.py / app_ch.py für den Regions-Filter). Die
+# allgemeine REGIONS-Liste oben ist auf den gesamten Alpenraum (DACH+FR+IT)
+# ausgelegt und daher fuer Schweizer Huetten zu grob: ca. 20% landeten im
+# Sammelbecken "Alpen", einige Engadiner Huetten wurden faelschlich als
+# "Tiroler Alpen" (Oesterreich) erkannt. Reihenfolge ist wichtig - bei
+# ueberlappenden Boxen gewinnt der erste Treffer, daher stehen kleinere/
+# spezifischere Regionen vor den grossen.
+CH_REGIONS = [
+    ("Tessin",                 45.70, 46.50,  8.40,  9.55),
+    ("Graubünden / Engadin",   46.20, 47.10,  8.60, 10.60),
+    ("Wallis",                 45.80, 46.55,  6.80,  8.40),
+    ("Berner Oberland",        46.30, 46.85,  7.50,  8.50),
+    ("Zentralschweiz",         46.85, 47.55,  7.45,  8.70),
+    ("Ostschweiz / Alpstein",  47.00, 47.80,  8.50,  9.60),
+    ("Uri / Glarner Alpen",    46.65, 47.10,  8.40,  9.40),
+    ("Jura / Mittelland",      46.40, 47.45,  5.90,  7.50),
+    ("Mont-Blanc-Gruppe",      45.65, 46.05,  6.65,  7.20),
+]
+
+CH_REGION_FALLBACK = "Schweiz (sonstige)"
+
+# Reihenfolge für das Dropdown in der App (alphabetisch wäre auch ok, aber
+# so gruppieren sich geografisch benachbarte Regionen).
+CH_REGION_NAMES = [name for name, *_ in CH_REGIONS] + [CH_REGION_FALLBACK]
+
+
+def ch_region_from_lonlat(lat: float, lon: float) -> str:
+    """Feinere Regionszuordnung speziell für Schweizer Hütten (siehe oben)."""
+    for name, s, n, w, e in CH_REGIONS:
+        if s <= lat <= n and w <= lon <= e:
+            return name
+    return CH_REGION_FALLBACK

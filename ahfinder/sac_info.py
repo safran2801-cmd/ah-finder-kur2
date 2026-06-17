@@ -52,7 +52,12 @@ def _load_sac_mapping() -> dict:
     if not mapping_path.exists():
         return {}
     try:
-        with open(mapping_path, "r", encoding="utf-8") as f:
+        # utf-8-sig statt utf-8: die Datei hat ein UTF-8-BOM am Anfang.
+        # Mit "utf-8" scheitert json.load() an jedem Aufruf mit einem
+        # JSONDecodeError, der unten abgefangen wird - das Mapping blieb
+        # dadurch IMMER leer und _find_tourenportal_url() fand nie einen
+        # Treffer, obwohl die Datei alle Huetten korrekt enthaelt.
+        with open(mapping_path, "r", encoding="utf-8-sig") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError):
         return {}

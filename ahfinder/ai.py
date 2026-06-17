@@ -28,9 +28,14 @@ CHAT_SYSTEM_PROMPT = (
     "1. check_hut_availability: Bei JEDER Frage nach Verfügbarkeit, freien Plätzen, ob man "
     "reservieren kann, ob die Hütte frei/ausgebucht ist – rufe SOFORT dieses Tool auf. "
     "Verweise den Nutzer NICHT auf externe Links, sondern liefere die konkreten Daten direkt. "
-    "2. fetch_hut_website: Für Kontakt, E-Mail, Telefon, Preise, Anreise. "
+    "2. fetch_hut_website: Für Kontakt, E-Mail, Telefon, Preise, Anreise - "
+    "wenn eine offizielle Website-URL in den Hüttendaten vorhanden ist. "
     "3. search_wikipedia: Für Geschichte, Geografie, alpine Hintergründe. "
-    "4. search_web: Für aktuelle Infos wie Neuigkeiten. "
+    "4. search_web: Für aktuelle Infos, Neuigkeiten, und IMMER auch für Anreise-/Zustiegsfragen "
+    "(z.B. 'wie kommt man am besten hin', 'gibt es eine Seilbahn/Bahn/Bus', Wegbeschreibung), "
+    "falls fetch_hut_website keine brauchbare Antwort liefert oder keine Website-URL vorhanden ist. "
+    "Verlasse dich bei Anreise-Fragen NICHT nur auf eines der beiden Werkzeuge - "
+    "nutze notfalls beide nacheinander. "
     "Nutze so viele Werkzeuge wie nötig, auch mehrere nacheinander, um eine vollständige Antwort zu liefern. "
     "Antworte dann ausführlich und hilfreich. Kein Markdown, keine Sternchen, kein Fettdruck. "
     "WICHTIG: Wiederhole bei Folgefragen KEINE bereits genannten Informationen. "
@@ -184,7 +189,10 @@ CHAT_TOOLS = [
             "name": "search_web",
             "description": (
                 "Sucht im Web nach Informationen wenn Wikipedia nichts Passendes liefert. "
-                "Geeignet für aktuelle Infos wie Öffnungszeiten, Reservierungen oder Preise."
+                "Geeignet für aktuelle Infos wie Öffnungszeiten, Reservierungen oder Preise, "
+                "und besonders für Anreise-/Zustiegsfragen (z.B. Seilbahn, Bus, Gehzeit, Wegbeschreibung) "
+                "wenn fetch_hut_website keine Website-URL hat oder keine brauchbare Antwort liefert. "
+                "Liefert nicht nur Linkliste, sondern auch extrahierten Seiteninhalt der besten Treffer."
             ),
             "parameters": {
                 "type": "object",
@@ -430,9 +438,16 @@ def _tool_fetch_website(url: str) -> str:
     text = _html.unescape(text)
     text = re.sub(r'\s+', ' ', text).strip()
 
-    # Relevante Abschnitte bevorzugen (Kontakt, Reservation, Buchung)
+    # Relevante Abschnitte bevorzugen (Kontakt, Reservation, Buchung, Anreise).
+    # Anreise/Zustieg-Begriffe ergaenzt: vorher fehlten diese komplett, wodurch
+    # Antworten auf "wie komme ich am besten hin?" auch dann leer blieben,
+    # wenn die Zielseite die Info enthielt - die Saetze wurden einfach nicht
+    # als "relevant" erkannt und beim Kuerzen auf 600 Zeichen weggeschnitten.
     keywords = ["kontakt", "reservation", "buchung", "telefon", "tel.", "öffnungszeit",
-                "bewartet", "mail", "e-mail", "auskunft"]
+                "bewartet", "mail", "e-mail", "auskunft",
+                "anreise", "anfahrt", "zustieg", "zugang", "wegbeschreibung",
+                "seilbahn", "gondel", "bergstation", "talstation", "bahn",
+                "wanderzeit", "gehzeit", "höhenmeter", "fussweg", "fußweg"]
     sentences = re.split(r'(?<=[.!?])\s+', text)
     relevant = [s for s in sentences if any(k in s.lower() for k in keywords)]
     excerpt = " ".join(relevant[:6]) if relevant else text[:600]
@@ -448,12 +463,21 @@ def _tool_fetch_website(url: str) -> str:
 
 
 def _tool_web_search(query: str) -> str:
-    """DuckDuckGo-Suche für den Chatbot."""
+    """DuckDuckGo-Suche für den Chatbot - inkl. Inhalts-Extraktion der Top-Treffer.
+
+    Vorher gab dieses Tool nur URL + kurzes DDG-Snippet zurück. Das genügte
+    dem Modell oft nicht, um z.B. Anreise-Fragen ("gibt es eine Seilbahn,
+    wie lange dauert der Aufstieg?") zu beantworten, weil die eigentliche
+    Antwort erst auf der verlinkten Seite steht, nicht im Snippet. Jetzt
+    werden die zwei besten Treffer zusätzlich abgerufen und relevante Sätze
+    daraus extrahiert (gleiche Logik wie fetch_hut_website) - dadurch bekommt
+    das Modell echten Seiteninhalt statt nur einer Trefferliste.
+    """
     from urllib.parse import quote
     import re as _re
     from .http import http_get
     from .config import CONFIG as _cfg
-    ck = cache_key("chat_ddg", query.lower().strip())
+    ck = cache_key("chat_ddg_v2", query.lower().strip())
     cached = cache_get(ck)
     if cached:
         return cached
@@ -471,9 +495,9 @@ def _tool_web_search(query: str) -> str:
         _re.DOTALL,
     )
 
-    lines = []
+    candidates = []
     seen_hosts: set = set()
-    for enc, snippet in result_blocks[:5]:
+    for enc, snippet in result_blocks[:6]:
         u = _unquote(enc)
         if not _re.match(r"^https?://", u):
             continue
@@ -482,13 +506,37 @@ def _tool_web_search(query: str) -> str:
             continue
         seen_hosts.add(host)
         clean_snippet = _re.sub(r"<[^>]+>", "", snippet).strip()[:200]
-        lines.append(f"- {u}\n  {clean_snippet}")
+        candidates.append((u, clean_snippet))
+        if len(candidates) >= 4:
+            break
 
-    if lines:
-        result = "Gefundene Seiten:\n" + "\n".join(lines[:4])
-        cache_set(ck, result, 3600)
-        return result
-    return "Keine Suchergebnisse gefunden."
+    if not candidates:
+        return "Keine Suchergebnisse gefunden."
+
+    # Top-2-Treffer zusätzlich abrufen und relevante Inhalte extrahieren -
+    # parallel, damit die Gesamtlaufzeit nicht steigt. Schlägt ein Abruf
+    # fehl (Timeout, 404 etc.), wird einfach nur das Snippet gezeigt.
+    def _fetch_excerpt(u: str) -> str:
+        try:
+            return _tool_fetch_website(u)
+        except Exception:
+            return ""
+
+    top_urls = [u for u, _ in candidates[:2]]
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        excerpts = list(ex.map(_fetch_excerpt, top_urls))
+
+    lines = ["Gefundene Seiten:"]
+    for (u, snippet), excerpt in zip(candidates[:2], excerpts):
+        lines.append(f"- {u}\n  {snippet}")
+        if excerpt and "nicht erreichbar" not in excerpt and "Ungültige URL" not in excerpt:
+            lines.append(f"  Inhalt von der Seite: {excerpt[:500]}")
+    for u, snippet in candidates[2:4]:
+        lines.append(f"- {u}\n  {snippet}")
+
+    result = "\n".join(lines)
+    cache_set(ck, result, 3600)
+    return result
 
 
 def build_hut_context(huts: list) -> str:

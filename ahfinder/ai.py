@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Optional
 
 from .cache import cache_get, cache_set
 from .config import (
@@ -138,12 +139,11 @@ CHAT_TOOLS = [
         "function": {
             "name": "check_hut_availability",
             "description": (
-                "Prüft die aktuelle Bettenverfügbarkeit einer Hütte für die nächsten 14 Tage. "
+                "Prüft die aktuelle Bettenverfügbarkeit einer SAC-Hütte für die nächsten 14 Tage. "
                 "Verwende dieses Tool wenn der Nutzer fragt ob eine Hütte frei ist, "
                 "Betten verfügbar sind, ob man reservieren kann, oder ähnliche Verfügbarkeitsfragen. "
-                "Funktioniert für SAC-Hütten über das SAC-Tourenportal (tagesgenau, mit freien "
-                "Plätzen) und zusätzlich für nicht-SAC-Hütten (DAV/ÖAV/CAI/FFCAM etc.), indem die "
-                "offizielle Website live auf ein bekanntes Online-Kalendersystem geprüft wird."
+                "Gibt für jeden Tag an ob Betten frei (available) oder ausgebucht (booked) sind "
+                "sowie die Anzahl freier Plätze."
             ),
             "parameters": {
                 "type": "object",
@@ -224,103 +224,40 @@ CHAT_TOOLS = [
 ]
 
 
-def _find_hut_by_name(hut_name: str, huts: list) -> Optional[dict]:
-    """Findet ein Hütten-Dict aus der aktuellen Suchergebnisliste per Namen.
-
-    Versucht: exakter Match -> case-insensitiv -> Teilstring (in beide
-    Richtungen), analog zu availability.find_portal_url().
-    """
-    if not huts:
-        return None
-    lower = hut_name.lower().strip()
-    for h in huts:
-        if h.get("name") == hut_name:
-            return h
-    for h in huts:
-        if (h.get("name") or "").lower() == lower:
-            return h
-    for h in huts:
-        name_l = (h.get("name") or "").lower()
-        if name_l and (lower in name_l or name_l in lower):
-            return h
-    return None
-
-
-def _tool_check_availability(hut_name: str, huts: Optional[list] = None) -> str:
-    """Verfügbarkeit einer Hütte für die nächsten 14 Tage abfragen.
-
-    Zwei-stufiger Ansatz:
-    1. SAC-Tourenportal (sac_hut_mapping.json) - tagesgenaue Betten-API.
-    2. Fallback für nicht-SAC-Hütten (DAV/ÖAV/CAI/FFCAM etc.): die offizielle
-       Website der Hütte wird live auf ein bekanntes Online-Kalendersystem
-       geprüft (generic_calendar.detect_system) und - falls per HTTP
-       abrufbar - direkt ausgelesen.
-    """
+def _tool_check_availability(hut_name: str) -> str:
+    """Verfügbarkeit einer SAC-Hütte für die nächsten 14 Tage abfragen."""
     from .availability import fetch_hut_availability, find_portal_url
-    from datetime import date, timedelta
+    from datetime import date
 
     portal_url = find_portal_url(hut_name)
-    if portal_url:
-        avail = fetch_hut_availability(hut_name)
-        if not avail:
-            return (
-                f"Für '{hut_name}' sind keine Verfügbarkeitsdaten verfügbar "
-                "(kein Online-Reservierungssystem oder Hütte nicht erreichbar)."
-            )
-
-        today = date.today()
-        lines = [f"Verfügbarkeit '{hut_name}' (nächste 14 Tage):"]
-        for iso_date, info in sorted(avail.items()):
-            try:
-                d = date.fromisoformat(iso_date)
-            except ValueError:
-                continue
-            if d < today:
-                continue
-            weekday = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"][d.weekday()]
-            status_label = "frei" if info["status"] == "available" else "ausgebucht"
-            places = info["freePlaces"]
-            places_str = f", {places} Plätze frei" if info["status"] == "available" and places > 0 else ""
-            lines.append(f"  {weekday} {d.strftime('%d.%m.%Y')}: {status_label}{places_str}")
-
-        return "\n".join(lines)
-
-    # Nicht im SAC-Verzeichnis -> Fallback über die offizielle Website
-    from . import generic_calendar
-
-    hut = _find_hut_by_name(hut_name, huts or [])
-    website_url = (hut or {}).get("websiteUrl") or (hut or {}).get("website")
-    if not hut or not website_url:
+    if not portal_url:
         return (
-            f"Die Hütte '{hut_name}' wurde nicht im SAC-Hütten-Verzeichnis gefunden, "
-            "und es ist keine offizielle Website bekannt, über die ein Kalendersystem "
-            "erkannt werden könnte. Keine Verfügbarkeitsdaten verfügbar."
+            f"Die Hütte '{hut_name}' wurde nicht im SAC-Hütten-Verzeichnis gefunden. "
+            "Keine Verfügbarkeitsdaten verfügbar."
+        )
+
+    avail = fetch_hut_availability(hut_name)
+    if not avail:
+        return (
+            f"Für '{hut_name}' sind keine Verfügbarkeitsdaten verfügbar "
+            "(kein Online-Reservierungssystem oder Hütte nicht erreichbar)."
         )
 
     today = date.today()
-    end = today + timedelta(days=14)
-    result = generic_calendar.check_via_website(hut_name, website_url, today, end)
+    lines = [f"Verfügbarkeit '{hut_name}' (nächste 14 Tage):"]
+    for iso_date, info in sorted(avail.items()):
+        try:
+            d = date.fromisoformat(iso_date)
+        except ValueError:
+            continue
+        if d < today:
+            continue
+        weekday = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"][d.weekday()]
+        status_label = "frei" if info["status"] == "available" else "ausgebucht"
+        places = info["freePlaces"]
+        places_str = f", {places} Plätze frei" if info["status"] == "available" and places > 0 else ""
+        lines.append(f"  {weekday} {d.strftime('%d.%m.%Y')}: {status_label}{places_str}")
 
-    if result.error and not result.blocked_dates:
-        return (
-            f"Für '{hut_name}' (nicht im SAC-Tourenportal) konnte keine Live-"
-            f"Verfügbarkeit ermittelt werden: {result.error}"
-        )
-
-    lines = [
-        f"Verfügbarkeit '{hut_name}' (System: {result.system}, nächste 14 Tage, "
-        "belegte Tage):"
-    ]
-    if result.blocked_dates:
-        for iso_date in result.blocked_dates:
-            try:
-                d = date.fromisoformat(iso_date)
-            except ValueError:
-                continue
-            weekday = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"][d.weekday()]
-            lines.append(f"  {weekday} {d.strftime('%d.%m.%Y')}: belegt")
-    else:
-        lines.append("  Keine belegten Tage im Zeitraum gefunden (oder alle Tage frei).")
     return "\n".join(lines)
 
 
@@ -353,20 +290,30 @@ def _tool_wikipedia(query: str) -> str:
 
     # Echten Artikeltitel per Volltextsuche ermitteln (robust ggü. Zusaetzen
     # wie "SAC"), dazu die Roh-Anfrage als Fallback in de/en mitnehmen.
-    titles: list = []
-    for lang in ("de", "fr", "it"):
+    # Die drei Sprachsuchen sind unabhaengig voneinander -> parallel statt
+    # sequentiell abfragen (spart bis zu ~2/3 der Wartezeit), und mit nur
+    # einem Retry-Versuch (statt Default 2) damit ein lahmer Wikipedia-
+    # Endpoint die Anfrage nicht unnoetig lange blockiert.
+    def _search_lang(lang: str):
         search_url = (
             f"https://{lang}.wikipedia.org/w/api.php?action=query&list=search"
             f"&srsearch={quote(query)}&format=json&srlimit=1&origin=*"
         )
-        r = http_get(search_url, 6)
+        r = http_get(search_url, 6, retries=1)
         if r["code"] == 200 and r["body"]:
             try:
                 hits = json.loads(r["body"]).get("query", {}).get("search", [])
                 if hits and hits[0].get("title"):
-                    titles.append((lang, hits[0]["title"]))
+                    return (lang, hits[0]["title"])
             except json.JSONDecodeError:
                 pass
+        return None
+
+    titles: list = []
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        for result in ex.map(_search_lang, ("de", "fr", "it")):
+            if result:
+                titles.append(result)
     titles += [("de", query), ("en", query)]
 
     tried: set = set()
@@ -380,7 +327,7 @@ def _tool_wikipedia(query: str) -> str:
             f"https://{lang}.wikipedia.org/w/api.php?action=query&prop=extracts"
             f"&explaintext=1&titles={quote(title)}&format=json&origin=*"
         )
-        r = http_get(extract_url, 8)
+        r = http_get(extract_url, 8, retries=1)
         if r["code"] != 200 or not r["body"]:
             continue
         try:
@@ -429,7 +376,7 @@ def _tool_fetch_website(url: str) -> str:
     if cached:
         return cached
 
-    r = http_get(url, timeout=10)
+    r = http_get(url, timeout=8, retries=1)
     if r["code"] != 200 or not r["body"]:
         return f"Website nicht erreichbar (HTTP {r.get('code', 0)})."
 
@@ -511,7 +458,7 @@ def _tool_web_search(query: str) -> str:
     if cached:
         return cached
     url = f"{_cfg['duckduckgo']['endpoint']}?q={quote(query)}&kl=ch-de"
-    r = http_get(url, 8)
+    r = http_get(url, 8, retries=1)
     if r["code"] != 200 or not r["body"]:
         return "Keine Suchergebnisse gefunden."
 
@@ -600,8 +547,53 @@ def _clean_text(text: str) -> str:
     return text
 
 
-def chat_response(messages: list, context: str, huts: Optional[list] = None) -> str:
-    """Multi-Turn-Chat mit Function Calling (Wikipedia + Web-Suche als Tools)."""
+_TOOL_LABELS = {
+    "check_hut_availability": "Prüfe Verfügbarkeit ({hut_name})",
+    "search_wikipedia": "Suche auf Wikipedia ({query})",
+    "search_web": "Suche im Web ({query})",
+    "fetch_hut_website": "Rufe Hütten-Website ab",
+}
+
+
+def _run_tool_call(tc: dict) -> dict:
+    """Führt einen einzelnen Tool-Call aus und gibt die Tool-Antwortnachricht zurück."""
+    fn_name = tc.get("function", {}).get("name", "")
+    try:
+        args = json.loads(tc.get("function", {}).get("arguments") or "{}")
+    except json.JSONDecodeError:
+        args = {}
+    query = args.get("query", "")
+
+    if fn_name == "check_hut_availability":
+        result = _tool_check_availability(args.get("hut_name", ""))
+    elif fn_name == "search_wikipedia":
+        result = _tool_wikipedia(query)
+    elif fn_name == "search_web":
+        result = _tool_web_search(query)
+    elif fn_name == "fetch_hut_website":
+        result = _tool_fetch_website(args.get("url", ""))
+    else:
+        result = "Unbekanntes Tool."
+
+    return {
+        "role": "tool",
+        "tool_call_id": tc.get("id", ""),
+        "content": result,
+    }
+
+
+def chat_response(
+    messages: list,
+    context: str,
+    on_tool_call: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Multi-Turn-Chat mit Function Calling (Wikipedia + Web-Suche als Tools).
+
+    `on_tool_call` ist ein optionaler Callback, der vor Ausführung der
+    Tool-Calls einer Runde mit einer kurzen, menschenlesbaren Statuszeile
+    aufgerufen wird (z.B. fuer eine st.status()-Anzeige im UI), damit lange
+    Antworten nicht wie "haengen" wirken.
+    """
     api_key = INFOMANIAK_API_KEY
     if _is_placeholder_key(api_key):
         return "Kein API-Key konfiguriert."
@@ -609,7 +601,11 @@ def chat_response(messages: list, context: str, huts: Optional[list] = None) -> 
     system = CHAT_SYSTEM_PROMPT + "\n\n" + context
     working_messages = [{"role": "system", "content": system}] + list(messages)
 
-    for _ in range(12):  # max 12 Runden – so viele Tool-Calls wie nötig
+    # 6 statt vormals 12 Runden: in der Praxis braucht eine vollstaendige
+    # Antwort selten mehr als 2-3 Tool-Runden. Eine niedrigere Obergrenze
+    # verhindert, dass ein "verirrtes" Modell die Anfrage durch endloses
+    # Nachfordern von Tools unnoetig in die Laenge zieht.
+    for _ in range(6):
         payload = {
             "model": MODEL_NAME,
             "temperature": 0.4,
@@ -647,38 +643,28 @@ def chat_response(messages: list, context: str, huts: Optional[list] = None) -> 
 
         working_messages.append(msg)  # Assistant-Nachricht mit tool_calls
 
-        for tc in tool_calls:
-            fn_name = tc.get("function", {}).get("name", "")
-            try:
-                args = json.loads(tc.get("function", {}).get("arguments") or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            query = args.get("query", "")
+        if on_tool_call:
+            for tc in tool_calls:
+                fn_name = tc.get("function", {}).get("name", "")
+                try:
+                    args = json.loads(tc.get("function", {}).get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                label_tpl = _TOOL_LABELS.get(fn_name, fn_name)
+                try:
+                    on_tool_call(label_tpl.format(**args))
+                except (KeyError, IndexError):
+                    on_tool_call(label_tpl.split(" (")[0])
 
-            try:
-                if fn_name == "check_hut_availability":
-                    result = _tool_check_availability(args.get("hut_name", ""), huts)
-                elif fn_name == "search_wikipedia":
-                    result = _tool_wikipedia(query)
-                elif fn_name == "search_web":
-                    result = _tool_web_search(query)
-                elif fn_name == "fetch_hut_website":
-                    fetch_url = args.get("url", "")
-                    result = _tool_fetch_website(fetch_url)
-                else:
-                    result = "Unbekanntes Tool."
-            except Exception as e:
-                # Ein einzelner Tool-Fehler (z.B. Netzwerk-Timeout) darf nicht
-                # die gesamte Chat-Antwort abstürzen lassen - stattdessen wird
-                # der Fehler als Tool-Ergebnis zurückgegeben, damit das Modell
-                # dem Nutzer eine sinnvolle Antwort geben kann statt komplett
-                # zu scheitern.
-                result = f"Fehler bei der Ausführung des Werkzeugs '{fn_name}': {e}"
-
-            working_messages.append({
-                "role": "tool",
-                "tool_call_id": tc.get("id", ""),
-                "content": result,
-            })
+        # Mehrere Tool-Calls einer Runde sind voneinander unabhaengig
+        # (verschiedene Hütten/Quellen) -> parallel statt sequentiell
+        # ausführen. Das ist der Hauptgrund, warum Antworten mit mehreren
+        # Tool-Aufrufen bisher unnötig lange dauerten.
+        if len(tool_calls) == 1:
+            working_messages.append(_run_tool_call(tool_calls[0]))
+        else:
+            with ThreadPoolExecutor(max_workers=min(4, len(tool_calls))) as ex:
+                tool_messages = list(ex.map(_run_tool_call, tool_calls))
+            working_messages.extend(tool_messages)
 
     return "Fehler beim Abrufen der Antwort – bitte erneut versuchen."

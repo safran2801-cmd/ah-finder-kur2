@@ -66,7 +66,7 @@ def _get_hut_middleware_id(portal_url: str) -> Optional[int]:
     if cached is not None:
         return int(cached) if cached else None
 
-    r = http_get(portal_url, timeout=10)
+    r = http_get(portal_url, timeout=8, retries=1)
     if r["code"] != 200 or not r["body"]:
         return None
 
@@ -115,7 +115,7 @@ def fetch_hut_availability(hut_name: str) -> Optional[dict]:
         "onlyAvailablePlaces": False,
         "huts": [hut_id],
     }
-    r = http_post(_AVAILABILITY_API, payload, timeout=10)
+    r = http_post(_AVAILABILITY_API, payload, timeout=8, retries=1)
     if r["code"] != 200 or not r["body"]:
         return None
 

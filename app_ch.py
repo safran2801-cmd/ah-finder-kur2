@@ -463,10 +463,16 @@ if data:
 
             context = build_hut_context(huts_to_show)
             with st.chat_message("assistant"):
-                with st.spinner(""):
+                with st.status("Antwort wird vorbereitet …", expanded=False) as status:
+                    def _on_tool_call(label: str, _status=status) -> None:
+                        _status.update(label=label)
+
                     answer = chat_response(
-                        st.session_state["chat_history"], context, huts_to_show
+                        st.session_state["chat_history"],
+                        context,
+                        on_tool_call=_on_tool_call,
                     )
+                    status.update(label="Fertig", state="complete")
                 st.write(answer)
 
             st.session_state["chat_history"].append(

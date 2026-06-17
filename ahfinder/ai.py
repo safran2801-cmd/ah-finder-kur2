@@ -601,11 +601,13 @@ def chat_response(
     system = CHAT_SYSTEM_PROMPT + "\n\n" + context
     working_messages = [{"role": "system", "content": system}] + list(messages)
 
-    # 6 statt vormals 12 Runden: in der Praxis braucht eine vollstaendige
-    # Antwort selten mehr als 2-3 Tool-Runden. Eine niedrigere Obergrenze
-    # verhindert, dass ein "verirrtes" Modell die Anfrage durch endloses
-    # Nachfordern von Tools unnoetig in die Laenge zieht.
-    for _ in range(6):
+    # 9 statt vormals 12 Runden. 6 war zu knapp: bei Fragen wie "wie kommt
+    # man am besten hin" ruft das Modell oft mehrere Tools in getrennten
+    # Runden auf (z.B. erst fetch_hut_website, dann search_wikipedia, dann
+    # noch search_web), nicht alle gebuendelt in einer Runde. Da die
+    # Tool-Ausfuehrung jetzt parallelisiert ist und schneller fehlschlaegt,
+    # bleibt die Worst-Case-Laufzeit trotz mehr Runden unter dem alten Wert.
+    for _ in range(9):
         payload = {
             "model": MODEL_NAME,
             "temperature": 0.4,

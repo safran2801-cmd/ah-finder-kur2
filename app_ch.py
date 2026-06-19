@@ -441,10 +441,13 @@ if data:
             """
             <style>
                 .st-key-chat_fab {
-                    position: fixed;
-                    bottom: 1.5rem;
-                    right: 1.5rem;
-                    z-index: 9999;
+                    position: fixed !important;
+                    top: auto !important;
+                    bottom: 1.5rem !important;
+                    right: 1.5rem !important;
+                    left: auto !important;
+                    width: auto !important;
+                    z-index: 9999 !important;
                 }
                 .st-key-chat_fab button {
                     width: 56px;
@@ -460,10 +463,12 @@ if data:
                     box-shadow: 0 8px 20px -4px rgba(0,0,0,0.45);
                 }
                 .st-key-chat_panel {
-                    position: fixed;
-                    bottom: 6.5rem;
-                    right: 1.5rem;
-                    width: 380px;
+                    position: fixed !important;
+                    top: auto !important;
+                    bottom: 6.5rem !important;
+                    right: 1.5rem !important;
+                    left: auto !important;
+                    width: 380px !important;
                     max-width: 90vw;
                     max-height: 65vh;
                     overflow-y: auto;
@@ -483,15 +488,13 @@ if data:
                 }
                 .chat-panel-header p { color: #cbd5e1 !important; font-size: 0.82rem; }
                 .st-key-chat_panel [data-testid="stChatInput"] {
-                    background: rgba(255,255,255,0.08) !important;
                     border-radius: 9999px !important;
-                    border: 1px solid rgba(255,255,255,0.15) !important;
                 }
                 .st-key-chat_panel [data-testid="stChatInput"] textarea {
-                    color: #ffffff !important;
+                    color: #111827 !important;
                 }
                 .st-key-chat_panel [data-testid="stChatInput"] textarea::placeholder {
-                    color: #94a3b8 !important;
+                    color: #6b7280 !important;
                 }
             </style>
             """,

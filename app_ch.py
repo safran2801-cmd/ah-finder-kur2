@@ -558,3 +558,4 @@ if data:
                     st.session_state["chat_history"].append(
                         {"role": "assistant", "content": answer}
                     )
+                    st.rerun()

@@ -453,7 +453,7 @@ if data:
                     width: 56px;
                     height: 56px;
                     border-radius: 9999px !important;
-                    background: #ef4444 !important;
+                    background: linear-gradient(135deg, #c0392b 0%, #8e0000 100%) !important;
                     color: #ffffff !important;
                     font-size: 1.5rem !important;
                     border: none !important;
@@ -472,7 +472,7 @@ if data:
                     max-width: 90vw;
                     max-height: 65vh;
                     overflow-y: auto;
-                    background: rgba(15, 23, 42, 0.94);
+                    background: linear-gradient(135deg, #c0392b 0%, #8e0000 60%, #5a0000 100%);
                     backdrop-filter: blur(14px);
                     border-radius: 1.1rem;
                     padding: 1.2rem 1.2rem 0.8rem 1.2rem;

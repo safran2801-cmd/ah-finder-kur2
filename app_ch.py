@@ -436,45 +436,122 @@ if data:
                 with col:
                     render_card(item)
 
-        # ── Chatbot ─────────────────────────────────────────────────────────
+        # ── Chatbot (schwebendes Widget) ──────────────────────────────────────
         st.markdown(
-            "<h2 style='color:white;margin-top:2rem;'>💬 Fragen zu den Hütten</h2>"
-            "<p style='color:white;opacity:0.8;margin-bottom:1rem;'>"
-            "Stelle Fragen zu den Suchergebnissen – das KI-Modell kennt "
-            "Wetter, Lage und Beschreibungen aller angezeigten Hütten.</p>",
+            """
+            <style>
+                .st-key-chat_fab {
+                    position: fixed;
+                    bottom: 1.5rem;
+                    right: 1.5rem;
+                    z-index: 9999;
+                }
+                .st-key-chat_fab button {
+                    width: 56px;
+                    height: 56px;
+                    border-radius: 9999px !important;
+                    background: #ef4444 !important;
+                    color: #ffffff !important;
+                    font-size: 1.5rem !important;
+                    border: none !important;
+                    display: flex !important;
+                    align-items: center !important;
+                    justify-content: center !important;
+                    box-shadow: 0 8px 20px -4px rgba(0,0,0,0.45);
+                }
+                .st-key-chat_panel {
+                    position: fixed;
+                    bottom: 6.5rem;
+                    right: 1.5rem;
+                    width: 380px;
+                    max-width: 90vw;
+                    max-height: 65vh;
+                    overflow-y: auto;
+                    background: rgba(15, 23, 42, 0.94);
+                    backdrop-filter: blur(14px);
+                    border-radius: 1.1rem;
+                    padding: 1.2rem 1.2rem 0.8rem 1.2rem;
+                    box-shadow: 0 18px 40px -8px rgba(0,0,0,0.55);
+                    z-index: 9998;
+                }
+                .st-key-chat_panel, .st-key-chat_panel p,
+                .st-key-chat_panel span, .st-key-chat_panel div,
+                .st-key-chat_panel li, .st-key-chat_panel label,
+                .st-key-chat_panel h1, .st-key-chat_panel h2,
+                .st-key-chat_panel h3, .st-key-chat_panel h4 {
+                    color: #ffffff !important;
+                }
+                .chat-panel-header p { color: #cbd5e1 !important; font-size: 0.82rem; }
+                .st-key-chat_panel [data-testid="stChatInput"] {
+                    background: rgba(255,255,255,0.08) !important;
+                    border-radius: 9999px !important;
+                    border: 1px solid rgba(255,255,255,0.15) !important;
+                }
+                .st-key-chat_panel [data-testid="stChatInput"] textarea {
+                    color: #ffffff !important;
+                }
+                .st-key-chat_panel [data-testid="stChatInput"] textarea::placeholder {
+                    color: #94a3b8 !important;
+                }
+            </style>
+            """,
             unsafe_allow_html=True,
         )
 
         if "chat_history" not in st.session_state:
             st.session_state["chat_history"] = []
+        if "chat_open" not in st.session_state:
+            st.session_state["chat_open"] = False
 
-        # Chat-Verlauf anzeigen
-        for msg in st.session_state["chat_history"]:
-            with st.chat_message(msg["role"]):
-                st.write(msg["content"])
+        # Schwebender Toggle-Button (Icon ↔ X)
+        fab = st.container(key="chat_fab")
+        with fab:
+            if st.button(
+                "✕" if st.session_state["chat_open"] else "💬",
+                key="chat_toggle_btn",
+            ):
+                st.session_state["chat_open"] = not st.session_state["chat_open"]
 
-        # Eingabe
-        if user_input := st.chat_input("Frage stellen …"):
-            st.session_state["chat_history"].append(
-                {"role": "user", "content": user_input}
-            )
-            with st.chat_message("user"):
-                st.write(user_input)
+        # Schwebendes Chat-Fenster (nur sichtbar wenn geöffnet)
+        if st.session_state["chat_open"]:
+            panel = st.container(key="chat_panel")
+            with panel:
+                st.markdown(
+                    "<div class='chat-panel-header'>"
+                    "<h4 style='margin:0 0 0.2rem 0;'>💬 Hütten-Chat</h4>"
+                    "<p>Fragen zu Verfügbarkeit, Wetter, Lage und Beschreibungen "
+                    "aller angezeigten Hütten.</p>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
 
-            context = build_hut_context(huts_to_show)
-            with st.chat_message("assistant"):
-                with st.status("Antwort wird vorbereitet …", expanded=False) as status:
-                    def _on_tool_call(label: str, _status=status) -> None:
-                        _status.update(label=label)
+                # Chat-Verlauf anzeigen
+                for msg in st.session_state["chat_history"]:
+                    with st.chat_message(msg["role"]):
+                        st.write(msg["content"])
 
-                    answer = chat_response(
-                        st.session_state["chat_history"],
-                        context,
-                        on_tool_call=_on_tool_call,
+                # Eingabe
+                if user_input := st.chat_input("Frage stellen …"):
+                    st.session_state["chat_history"].append(
+                        {"role": "user", "content": user_input}
                     )
-                    status.update(label="Fertig", state="complete")
-                st.write(answer)
+                    with st.chat_message("user"):
+                        st.write(user_input)
 
-            st.session_state["chat_history"].append(
-                {"role": "assistant", "content": answer}
-            )
+                    context = build_hut_context(huts_to_show)
+                    with st.chat_message("assistant"):
+                        with st.status("Antwort wird vorbereitet …", expanded=False) as status:
+                            def _on_tool_call(label: str, _status=status) -> None:
+                                _status.update(label=label)
+
+                            answer = chat_response(
+                                st.session_state["chat_history"],
+                                context,
+                                on_tool_call=_on_tool_call,
+                            )
+                            status.update(label="Fertig", state="complete")
+                        st.write(answer)
+
+                    st.session_state["chat_history"].append(
+                        {"role": "assistant", "content": answer}
+                    )
